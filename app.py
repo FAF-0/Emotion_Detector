@@ -3,8 +3,32 @@ import os, base64, io, traceback
 from PIL import Image
 import joblib
 import numpy as np
+import sqlite3
+from datetime import datetime
 
-# optional CORS
+# ==========================
+# DATABASE SETUP
+# ==========================
+DB_PATH = "emotion_records.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS emotion_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    emotion TEXT NOT NULL,
+                    confidence REAL,
+                    timestamp TEXT
+                )''')
+    conn.commit()
+    conn.close()
+
+init_db()  # ensure database exists when app starts
+
+# ==========================
+# OPTIONAL CORS
+# ==========================
 try:
     from flask_cors import CORS
 except Exception:
@@ -16,7 +40,9 @@ app.config['MAX_CONTENT_LENGTH'] = 12 * 1024 * 1024  # 12 MB
 if CORS:
     CORS(app)
 
-# model paths
+# ==========================
+# MODEL LOADING
+# ==========================
 MODEL_PATH = os.path.join("models", "mlp_emotion.pkl")
 SCALER_PATH = os.path.join("models", "scaler.pkl")
 LE_PATH = os.path.join("models", "label_encoder.pkl")
@@ -25,7 +51,6 @@ mlp_model = None
 scaler = None
 label_encoder = None
 
-# load model/scaler if present
 try:
     if os.path.exists(MODEL_PATH):
         mlp_model = joblib.load(MODEL_PATH)
@@ -43,7 +68,9 @@ except Exception as e:
     print("Error loading model/scaler:", e)
     traceback.print_exc()
 
-
+# ==========================
+# ROUTES
+# ==========================
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -114,7 +141,6 @@ def detect_emotion():
             6: "Neutral"
         }
 
-        # Use the emotion label if numeric, else fallback to actual class name
         try:
             numeric_label = int(mlp_model.classes_[idx])
             label = emotion_labels.get(numeric_label, str(numeric_label))
@@ -122,6 +148,18 @@ def detect_emotion():
             label = str(mlp_model.classes_[idx])
 
         confidence = float(probs[idx])
+
+        # ✅ Get name and save record to database
+        user_name = data.get('name', 'Anonymous')
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("INSERT INTO emotion_logs (name, emotion, confidence, timestamp) VALUES (?, ?, ?, ?)",
+                      (user_name, label, confidence, datetime.now().isoformat()))
+            conn.commit()
+            conn.close()
+        except Exception as db_err:
+            print("Database insert error:", db_err)
 
         resp = jsonify({"emotion": label, "confidence": confidence})
         resp.headers['Access-Control-Allow-Origin'] = '*'
@@ -135,6 +173,17 @@ def detect_emotion():
             "details": str(e),
             "trace_tail": tb.splitlines()[-6:]
         }), 500
+
+
+@app.route('/records', methods=['GET'])
+def get_records():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, emotion, confidence, timestamp FROM emotion_logs ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    records = [{"name": r[0], "emotion": r[1], "confidence": r[2], "timestamp": r[3]} for r in rows]
+    return jsonify(records)
 
 
 if __name__ == '__main__':
