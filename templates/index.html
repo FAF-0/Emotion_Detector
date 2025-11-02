@@ -6,7 +6,6 @@
     <title>Emotion Detection Web App</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
     <style>
-        /* Minimal inline styles for layout */
         body { font-family: Arial, sans-serif; padding: 18px; max-width: 900px; margin: auto; }
         .container { display: grid; gap: 12px; }
         video { width: 320px; height: 240px; background: #000; }
@@ -14,12 +13,20 @@
         .button-group button { margin-right: 8px; }
         #status { font-size: 0.9rem; color: #333; }
         #error { color: #a00; }
+        .name-section { margin: 10px 0; }
+        .name-section input { padding: 6px; width: 220px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Emotion Detection</h1>
         <p>Upload an image or use your webcam to detect emotions.</p>
+
+        <!-- 🧍‍♂️ USER NAME INPUT -->
+        <div class="name-section">
+            <label for="userName"><strong>Your Name:</strong></label>
+            <input type="text" id="userName" placeholder="Enter your name">
+        </div>
 
         <div>
             <strong>Server / model status:</strong>
@@ -69,6 +76,7 @@
             const emotionResult = document.getElementById('emotionResult');
             const confidenceEl = document.getElementById('confidence');
             const errorEl = document.getElementById('error');
+            const userNameInput = document.getElementById('userName'); // 👈 added
 
             let stream = null;
 
@@ -77,13 +85,13 @@
                     const res = await fetch('/model_status');
                     if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
                     const json = await res.json();
-                    console.log('model_status', json)
-                    statusEl.textContent = json.model_loaded ? `Model loaded (${json.classes?.join(',')||'no classes'})` : 'Model not loaded';
+                    statusEl.textContent = json.model_loaded
+                        ? `Model loaded (${json.classes?.join(',')||'no classes'})`
+                        : 'Model not loaded';
                     statusEl.style.color = json.model_loaded ? 'green' : 'orange';
                 } catch (err) {
                     statusEl.textContent = 'Server unreachable';
                     statusEl.style.color = 'red';
-                    console.error('model_status error:', err);
                 }
             }
             refreshBtn.addEventListener('click', updateModelStatus);
@@ -93,14 +101,8 @@
                 try {
                     await navigator.mediaDevices.getUserMedia({ video: true });
                     return true;
-                } catch (err) {
-                    if (err && err.name === 'NotAllowedError') {
-                        alert('Camera access denied. Allow camera in browser site settings for this page.');
-                    } else if (err && err.name === 'NotFoundError') {
-                        alert('No camera found. Connect a camera and try again.');
-                    } else {
-                        alert('Unable to access camera: ' + (err && err.message ? err.message : 'unknown error'));
-                    }
+                } catch {
+                    alert('Please allow camera access.');
                     return false;
                 }
             }
@@ -116,8 +118,7 @@
                     startBtn.disabled = true;
                     errorEl.textContent = '';
                 } catch (err) {
-                    console.error('start camera error', err);
-                    errorEl.textContent = 'Error starting camera: ' + (err.message || err);
+                    errorEl.textContent = 'Error starting camera: ' + err.message;
                 }
             });
 
@@ -143,8 +144,6 @@
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 const dataUrl = canvas.toDataURL('image/jpeg');
                 capturedImage.src = dataUrl;
-                // optionally stop camera after capture
-                // stopBtn.click();
                 detectEmotion(dataUrl);
             });
 
@@ -159,14 +158,9 @@
                     capturedImage.src = e.target.result;
                     detectEmotion(e.target.result);
                 };
-                reader.onerror = (e) => {
-                    console.error('File read error', e);
-                    alert('Error reading file');
-                };
                 reader.readAsDataURL(file);
             });
 
-            // Resize/compress helper to match training (48x48) and reduce payload
             function resizeDataUrl(sourceDataUrl, targetW = 48, targetH = 48, quality = 0.7) {
                 return new Promise((resolve) => {
                     const img = new Image();
@@ -175,26 +169,19 @@
                         c.width = targetW;
                         c.height = targetH;
                         const ctx = c.getContext('2d');
-                        // center-crop & draw preserving aspect ratio
                         const sw = img.width, sh = img.height;
                         const sRatio = sw / sh;
                         const tRatio = targetW / targetH;
                         let sx=0, sy=0, sWidth=sw, sHeight=sh;
                         if (sRatio > tRatio) {
-                            // source is wider -> crop sides
                             sWidth = Math.round(sh * tRatio);
                             sx = Math.round((sw - sWidth) / 2);
                         } else {
-                            // source is taller -> crop top/bottom
                             sHeight = Math.round(sw / tRatio);
                             sy = Math.round((sh - sHeight) / 2);
                         }
                         ctx.drawImage(img, sx, sy, sWidth, sHeight, 0, 0, targetW, targetH);
                         resolve(c.toDataURL('image/jpeg', quality));
-                    };
-                    img.onerror = () => {
-                        // fallback: return original
-                        resolve(sourceDataUrl);
                     };
                     img.src = sourceDataUrl;
                 });
@@ -204,44 +191,38 @@
                 errorEl.textContent = '';
                 emotionResult.textContent = 'Detecting...';
                 confidenceEl.textContent = '';
+
+                const userName = userNameInput.value.trim() || "Anonymous"; // 👈 get name
+
                 try {
-                    // Resize to expected model size and compress to keep under server limit
                     const resizedData = await resizeDataUrl(imageData, 48, 48, 0.7);
 
                     const response = await fetch('/detect_emotion', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ image: resizedData })
+                        body: JSON.stringify({
+                            name: userName,   // 👈 include name
+                            image: resizedData
+                        })
                     });
 
-                    const text = await response.text();
-                    let result = null;
-                    try { result = text ? JSON.parse(text) : null; } catch (e) { console.warn('Non-JSON response', text); }
+                    const result = await response.json();
 
                     if (!response.ok) {
-                        console.error('Server returned error', response.status, text);
-                        errorEl.textContent = (result && result.error) ? result.error : `Server error ${response.status}`;
+                        errorEl.textContent = result.error || `Server error ${response.status}`;
                         emotionResult.textContent = 'Error';
                         return;
                     }
 
                     emotionResult.textContent = result?.emotion ?? 'None';
-                    if (result?.confidence != null) {
-                        confidenceEl.textContent = `Confidence: ${(result.confidence * 100).toFixed(2)}%`;
-                    } else {
-                        confidenceEl.textContent = '';
-                    }
+                    confidenceEl.textContent = result?.confidence
+                        ? `Confidence: ${(result.confidence * 100).toFixed(2)}%`
+                        : '';
                 } catch (err) {
-                    console.error('Network or JS error', err);
-                    errorEl.textContent = 'Network error. See console.';
+                    errorEl.textContent = 'Network or script error.';
                     emotionResult.textContent = 'Error';
                 }
             }
-
-            // optional: allow pressing Enter when file selected to upload quickly
-            imageUpload.addEventListener('change', () => {
-                // preview selected file without auto sending; user must click Upload
-            });
         });
     </script>
 </body>
